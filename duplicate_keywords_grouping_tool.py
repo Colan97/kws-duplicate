@@ -1,16 +1,10 @@
 import streamlit as st
 import pandas as pd
 import re
+from difflib import SequenceMatcher
 from collections import defaultdict
 import nltk
-from nltk.stem import PorterStemmer, WordNetLemmatizer
-
-# For the cosine similarity method, scikit-learn is required.
-try:
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.metrics.pairwise import cosine_similarity
-except ImportError:
-    st.error("scikit-learn is required for the cosine similarity method. Please install it via pip (pip install scikit-learn).")
+from nltk.stem import PorterStemmer
 
 # Ensure nltk data is available
 try:
@@ -25,86 +19,61 @@ except LookupError:
 
 
 def normalize_keyword(keyword):
-    """
-    Normalize a keyword by converting to lowercase, removing punctuation,
-    common articles, extra spaces, and then applying lemmatization.
-    """
+    """Normalize keyword by removing common variations."""
     keyword = keyword.lower().strip()
-    # Remove punctuation
-    keyword = re.sub(r'[^\w\s]', '', keyword)
-    # Remove common articles
-    keyword = re.sub(r'\b(for|the|a|an)\b', '', keyword)
-    # Remove extra spaces
-    keyword = re.sub(r'\s+', ' ', keyword).strip()
-    # Lemmatize each word
-    lemmatizer = WordNetLemmatizer()
-    normalized_words = [lemmatizer.lemmatize(word) for word in keyword.split()]
-    return ' '.join(normalized_words)
+    keyword = re.sub(r's\b', '', keyword)  # remove trailing 's'
+    keyword = re.sub(r'\b(for|the|a|an)\b', '', keyword)  # remove common articles
+    keyword = re.sub(r'\s+', ' ', keyword).strip()  # remove extra spaces
+    return keyword
 
 
-def process_keywords(keywords, similarity_threshold=0.85, method='stem'):
+def process_keywords(keywords, similarity_threshold=0.85):
     """
-    Group similar keywords together using one of two methods:
-    - 'stem': A basic stem-based Jaccard-like similarity.
-    - 'cosine': Cosine similarity on TF-IDF vectors.
+    Group similar keywords together using a Jaccard-like approach (stems intersection over union).
     """
     keywords = [kw.strip() for kw in keywords if kw.strip()]
     groups = defaultdict(list)
     group_counter = 1
-    assigned = [False] * len(keywords)
-    
-    if method == 'stem':
-        stemmer = PorterStemmer()
-        for i, kw in enumerate(keywords):
-            if assigned[i]:
-                continue
-            normalized_kw = normalize_keyword(kw)
-            stemmed_words = {stemmer.stem(word) for word in normalized_kw.split()}
+    stemmer = PorterStemmer()
+    assigned_keywords = set()  # Keep track of assigned keywords
+
+    for kw in keywords:
+        if kw in assigned_keywords:
+            continue
+
+        normalized_kw = normalize_keyword(kw)
+        stemmed_words = {stemmer.stem(word) for word in normalized_kw.split()}
+
+        assigned = False
+        for group_id, group_kws in groups.items():
+            for group_kw in group_kws:
+                normalized_group_kw = normalize_keyword(group_kw)
+                stemmed_group_words = {stemmer.stem(word) for word in normalized_group_kw.split()}
+
+                intersection = len(stemmed_words.intersection(stemmed_group_words))
+                union = len(stemmed_words.union(stemmed_group_words))
+                similarity = intersection / union if union else 0.0
+
+                if similarity >= similarity_threshold:
+                    groups[group_id].append(kw)
+                    assigned_keywords.add(kw)
+                    assigned = True
+                    break
+            if assigned:
+                break
+
+        if not assigned:
             groups[group_counter].append(kw)
-            assigned[i] = True
-            for j in range(i + 1, len(keywords)):
-                if not assigned[j]:
-                    normalized_kw2 = normalize_keyword(keywords[j])
-                    stemmed_words2 = {stemmer.stem(word) for word in normalized_kw2.split()}
-                    intersection = len(stemmed_words.intersection(stemmed_words2))
-                    union = len(stemmed_words.union(stemmed_words2))
-                    similarity = intersection / union if union else 0.0
-                    if similarity >= similarity_threshold:
-                        groups[group_counter].append(keywords[j])
-                        assigned[j] = True
+            assigned_keywords.add(kw)
             group_counter += 1
 
-    elif method == 'cosine':
-        # Create a list of normalized keywords for vectorization
-        normalized_keywords = [normalize_keyword(kw) for kw in keywords]
-        vectorizer = TfidfVectorizer()
-        tfidf = vectorizer.fit_transform(normalized_keywords)
-        sim_matrix = cosine_similarity(tfidf)
-        for i in range(len(keywords)):
-            if assigned[i]:
-                continue
-            groups[group_counter].append(keywords[i])
-            assigned[i] = True
-            for j in range(i + 1, len(keywords)):
-                if not assigned[j]:
-                    if sim_matrix[i, j] >= similarity_threshold:
-                        groups[group_counter].append(keywords[j])
-                        assigned[j] = True
-            group_counter += 1
-
-    else:
-        st.error("Invalid similarity method selected. Please choose 'stem' or 'cosine'.")
-        
     return groups
 
 
 def main():
-    st.title("Enhanced Keyword Grouping Tool")
-    st.write(
-        "This app groups similar keywords using an adjustable similarity threshold and two different "
-        "similarity methods. Choose your input method, select a similarity method, adjust your threshold, "
-        "and click **Group Keywords** to see results."
-    )
+    st.title("Keyword Grouping Tool")
+    st.write("This app groups similar keywords using an adjustable similarity threshold. "
+             "Choose how to input keywords, set your threshold, and click **Group Keywords** to see results.")
 
     # --- Select input method ---
     input_method = st.selectbox(
@@ -119,6 +88,7 @@ def main():
         st.write("Paste or type your keywords below (comma-separated or line-separated).")
         text_input = st.text_area("Keywords")
         if text_input:
+            # Accept both commas and line breaks
             raw_list = []
             for line in text_input.splitlines():
                 raw_list.extend(line.split(","))
@@ -130,6 +100,7 @@ def main():
         uploaded_file = st.file_uploader("Upload your file", type=["txt", "csv", "tsv"])
         if uploaded_file is not None:
             content = uploaded_file.read().decode("utf-8", errors="ignore")
+            # Accept both commas and line breaks
             raw_list = []
             for line in content.splitlines():
                 raw_list.extend(line.split(","))
@@ -141,14 +112,6 @@ def main():
         text_input = st.text_area("Keywords (one per line)")
         if text_input:
             keywords = [line.strip() for line in text_input.splitlines() if line.strip()]
-
-    # --- Select similarity method ---
-    similarity_method = st.selectbox(
-        "Select similarity method:",
-        ("Basic Stem-based", "Cosine Similarity (TF-IDF)")
-    )
-    # Map selection to internal method identifier
-    method_identifier = "stem" if similarity_method == "Basic Stem-based" else "cosine"
 
     # --- Slider for similarity threshold ---
     threshold = st.slider(
@@ -165,14 +128,15 @@ def main():
             st.warning("No keywords provided. Please add some keywords first.")
             return
 
-        # Process the keywords using the selected similarity method
-        groups = process_keywords(keywords, similarity_threshold=threshold, method=method_identifier)
+        # Process the keywords
+        groups = process_keywords(keywords, threshold)
 
         # Create a DataFrame of group -> keyword
         rows = []
         for group_id, group_keywords in groups.items():
             for kw in group_keywords:
                 rows.append({'Group': group_id, 'Keyword': kw})
+
         df = pd.DataFrame(rows)
         df = df.sort_values(['Group', 'Keyword']).reset_index(drop=True)
 
